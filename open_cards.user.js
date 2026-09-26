@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         WikiMasters Bot
 // @namespace    wiki-masters-bot
-// @version      1.3.13
+// @version      1.4.1
 // @description  Pack Opener + stats, Market Watcher (auto-bid / snipe / wishlist), Trash Seller — pour wiki-masters.com
 // @author       Sephiroth-ctrl
 // @match        https://www.wiki-masters.com/*
@@ -9,7 +9,7 @@
 // @run-at       document-idle
 // @noframes
 // @grant        none
-// @updateURL    https://raw.githubusercontent.com/Sephiroth-ctrl/Wiki-Masters-Bot/refs/heads/main/open_cards.user.js
-// @downloadURL  https://raw.githubusercontent.com/Sephiroth-ctrl/Wiki-Masters-Bot/refs/heads/main/open_cards.user.js
-// @require      https://raw.githubusercontent.com/Sephiroth-ctrl/Wiki-Masters-Bot/refs/heads/main/open_cards.js
+// @updateURL    https://raw.githubusercontent.com/AdamGiuglardo/Wiki-Masters-Bot/refs/heads/main/open_cards.user.js
+// @downloadURL  https://raw.githubusercontent.com/AdamGiuglardo/Wiki-Masters-Bot/refs/heads/main/open_cards.user.js
+// @require      https://raw.githubusercontent.com/AdamGiuglardo/Wiki-Masters-Bot/refs/heads/main/open_cards.js
 // ==/UserScript==

@@ -1,7 +1,7 @@
 (function () {
 
     /* Numéro de version du bot — affiché en bas du panneau Paramètres. */
-    const WM_VERSION = '1.3.13-prod';
+    const WM_VERSION = '1.4.1-prod';
 
     console.log('[WikiMasters] script loaded v' + WM_VERSION + ' - building UI...');
 
@@ -19,11 +19,12 @@
     const KEYWORDS_FOURBE_KEY = 'wm_keywords_fourbe';
     const KEYWORDS_EXCLUDE_KEY = 'wm_keywords_exclude';
     const KEYWORDS_HUNTER_KEY = 'wm_keywords_hunter';
-    const MARKET_REFRESH_MS = 10000;
+    const MARKET_REFRESH_MS = 5000;
     const MARKET_API_BASE = "https://www.wiki-masters.com/api/marketplace";
     const MARKET_PAGE_LIMIT = 50;
     const MARKET_PAGE_CONCURRENCY = 5; // pages chargées en parallèle par lot
     const MARKET_MIN_GAP_MS = 1500;    // souffle minimal entre 2 scans
+    const FOURBE_DISCOVERY_WINDOW_MS = 5 * 60 * 1000;
     // Discord webhook — configuré par chaque utilisateur via la section Paramètres
     function getDiscordWebhook() { return getSetting('discordWebhook').trim(); }
     function setDiscordWebhook(url) { setSetting('discordWebhook', (url || '').trim()); }
@@ -277,11 +278,21 @@
     const FETCH_TIMEOUT_MS = 15000;
     async function fetchWithTimeout(url, opts = {}, timeoutMs = FETCH_TIMEOUT_MS) {
         const controller = new AbortController();
+        // Preserve an eventual caller-provided AbortSignal. The old implementation
+        // silently replaced it, which made it impossible for a stopped module to
+        // cancel an in-flight request.
+        const callerSignal = opts.signal;
+        const abortFromCaller = () => controller.abort();
+        if (callerSignal) {
+            if (callerSignal.aborted) controller.abort();
+            else callerSignal.addEventListener('abort', abortFromCaller, { once: true });
+        }
         const timer = setTimeout(() => controller.abort(), timeoutMs);
         try {
             return await fetch(url, { ...opts, signal: controller.signal });
         } finally {
             clearTimeout(timer);
+            if (callerSignal) callerSignal.removeEventListener('abort', abortFromCaller);
         }
     }
 
@@ -620,6 +631,15 @@
 
     // Filtre de recherche live du Market Watcher (transitoire, non persisté)
     let marketSearchQuery = '';
+    // Filtre de rareté du Market Watcher : vide = toutes les raretés.
+    const MARKET_RARITY_KEY = 'wm_market_rarity_filter';
+    let marketRarityFilter = '';
+    try {
+        const savedRarity = (localStorage.getItem(MARKET_RARITY_KEY) || '').toUpperCase();
+        if (!savedRarity || Object.prototype.hasOwnProperty.call(RARITY, savedRarity)) {
+            marketRarityFilter = savedRarity;
+        }
+    } catch(e) {}
     // Masquer les enchères dont je possède déjà la carte (persisté)
     const MARKET_HIDE_OWNED_KEY = 'wm_market_hide_owned';
     let marketHideOwned = false;
@@ -644,6 +664,30 @@
     const MARKET_SEARCH_DIACRITICS = new RegExp('[\\u0300-\\u036f]', 'g');
     function marketSearchNorm(s) {
         return (s || '').toString().normalize('NFD').replace(MARKET_SEARCH_DIACRITICS, '').toLowerCase();
+    }
+    // Une réponse du marché peut encore contenir une enchère terminée pendant
+    // quelques secondes (cache serveur / pagination). Elle ne doit jamais être
+    // proposée comme opportunité, même si elle correspond à un mot-clé ou à une
+    // enchère suivie.
+    const MARKET_TERMINAL_STATUSES = new Set([
+        'ended', 'finished', 'sold', 'closed', 'completed', 'cancelled', 'canceled', 'expired'
+    ]);
+    function marketAuctionEndMs(auction) {
+        const endValue = auction?.end_at ?? auction?.ends_at ?? auction?.endsAt;
+        if (endValue == null || endValue === '') return NaN;
+        let endTs = typeof endValue === 'number' ? endValue : Date.parse(endValue);
+        // Certains retours API utilisent Unix en secondes, d'autres ISO/ms.
+        if (Number.isFinite(endTs) && endTs > 0 && endTs < 1e12) endTs *= 1000;
+        return endTs;
+    }
+    function isMarketAuctionLive(auction, now = Date.now()) {
+        if (!auction) return false;
+        const status = String(auction.status ?? auction.state ?? '').trim().toLowerCase();
+        if (MARKET_TERMINAL_STATUSES.has(status)) return false;
+        if (auction.ended === true || auction.is_ended === true || auction.active === false) return false;
+        const endTs = marketAuctionEndMs(auction);
+        if (!Number.isFinite(endTs)) return true;
+        return !Number.isFinite(endTs) || endTs > now;
     }
     const RARITY_ORDER = { L: 5, UR: 4, SR: 3, R: 2, PC: 1, C: 0 };
     let lastHitsCache = []; // cache pour re-render sans attendre le prochain scan
@@ -3140,10 +3184,11 @@ function sendToDiscord(text, color = 5814783, category = 'general') {
             await fetchBalance();
             marketStatusEl.innerHTML = `<span style="color:#06b6d4;font-size:10px;">⏳ scan p.1…</span>`;
 
-            const { auctions, total, totalPages } = await fetchAllMarketAuctions((page, total, found) => {
+            const { auctions: fetchedAuctions, total, totalPages } = await fetchAllMarketAuctions((page, total, found) => {
                 marketStatusEl.innerHTML =
                     `<span style="color:#06b6d4;font-size:10px;white-space:nowrap;">⏳ p.${page}/${total} · ${found} annonces</span>`;
             });
+            const auctions = fetchedAuctions.filter(a => isMarketAuctionLive(a));
 
             const now = new Date().toLocaleTimeString("fr-FR",
                 { hour:"2-digit", minute:"2-digit", second:"2-digit" });
@@ -3309,6 +3354,28 @@ function sendToDiscord(text, color = 5814783, category = 'general') {
             // annonces une seconde fois pour la même information).
             const kwClassCache = new Map(); // auction.id -> classification
 
+            // Armement anticipé : une enchère Fourbe doit être découverte et suivie
+            // lorsqu'il reste jusqu'à 5 minutes, pas seulement lorsqu'elle entre dans
+            // la fenêtre de tir de quelques secondes. Le tir reste, lui, piloté par
+            // snipeSecondsBefore dans la hot-lane.
+            let earlyFourbeArmed = false;
+            const serverNowMs = serverNow();
+            for (const a of auctions) {
+                const endTs = marketAuctionEndMs(a);
+                const remaining = endTs - serverNowMs;
+                if (!Number.isFinite(remaining) || remaining <= 0
+                    || remaining > FOURBE_DISCOVERY_WINDOW_MS) continue;
+                if (!hasFourbeKeyword(a.card) || hasPriorityKeyword(a.card)
+                    || autoBidSet.has(a.id) || snipeSet.has(a.id)
+                    || isSelf(a.current_bidder?.username)
+                    || (collectionMap.get(a.card?.id) || 0) > 0) continue;
+                snipeSet.add(a.id);
+                activeHitsMap.set(a.id, { auction: a, endAt: a.end_at });
+                earlyFourbeArmed = true;
+                wmLog(`🕵️ Fourbe détecté à l'avance : <b>${a.card?.wikipedia_title || '?'}</b> — ${Math.ceil(remaining / 60000)} min restantes, snipe prévu à ~${getSetting('snipeSecondsBefore')}s`);
+            }
+            if (earlyFourbeArmed) saveSnipeSet();
+
             // Filtre les hits : mots-clés (standard + prioritaires) OU enchères où je mise.
             // Exclusion STRICTE : une annonce contenant un mot exclu est écartée — SAUF
             // si je mise déjà dessus (je veux toujours voir/suivre mes propres enchères).
@@ -3321,9 +3388,19 @@ function sendToDiscord(text, color = 5814783, category = 'general') {
                 const cls = classifyAuctionKeywords(a.card);
                 kwClassCache.set(a.id, cls);
                 if (myBidsSet.has(a.id)) return true;
+                if (marketRarityFilter && (a.card?.rarity || '').toUpperCase() !== marketRarityFilter) return false;
                 if (cls.excluded) return false;
                 return cls.keywordMatch;
             });
+
+            // Purge immédiatement les enchères terminées déjà présentes dans le cache
+            // mémoire, sinon elles resteraient visibles jusqu'au prochain re-render.
+            for (const [id, entry] of activeHitsMap) {
+                if (!isMarketAuctionLive(entry?.auction)) {
+                    activeHitsMap.delete(id);
+                    lastMarketHits.delete(id);
+                }
+            }
 
             // Marque l'instant de première détection de chaque hit (pour tri "ajout récent")
             // et purge les entrées des enchères qui ne sont plus listées.
@@ -3673,6 +3750,7 @@ function sendToDiscord(text, color = 5814783, category = 'general') {
     }
 
     function renderMarketHits(marketAlertEl, hits, newHits) {
+        hits = hits.filter(a => isMarketAuctionLive(a));
         // Cache pour permettre un re-render au changement de tri sans attendre le prochain scan
         lastHitsCache = hits;
 
@@ -3697,13 +3775,22 @@ function sendToDiscord(text, color = 5814783, category = 'general') {
             hits = hits.filter(a => myBidsSet.has(a.id) || !hasExcludedWord(a.card));
         }
 
+        // Le filtre de rareté s'applique aussi au rendu immédiat et aux données
+        // restaurées après actualisation. Les enchères déjà suivies restent visibles.
+        if (marketRarityFilter) {
+            hits = hits.filter(a => myBidsSet.has(a.id)
+                || (a.card?.rarity || '').toUpperCase() === marketRarityFilter);
+        }
+
         // Filtres d'affichage : recherche live (titre/catégorie/mot-clé, sans accents)
         // + masquage des cartes déjà possédées.
         const totalBeforeFilter = hits.length;
         const sq = marketSearchNorm(marketSearchQuery.trim());
-        const filterActive = sq || marketHideOwned;
+        const filterActive = sq || marketHideOwned || marketRarityFilter;
         if (filterActive) {
             hits = hits.filter(a => {
+                if (marketRarityFilter && !myBidsSet.has(a.id)
+                    && (a.card?.rarity || '').toUpperCase() !== marketRarityFilter) return false;
                 // Masque les cartes déjà possédées DANS LA MÊME RARETÉ. Une carte possédée en
                 // SR mais listée en UR (revalorisée par le site) n'est PAS un doublon → visible.
                 if (marketHideOwned && isOwnedDuplicate(a.card?.id ?? a.card_id, a.card?.rarity)) return false;
@@ -4499,8 +4586,11 @@ function sendToDiscord(text, color = 5814783, category = 'general') {
     /* ===================== MARKET WATCHER LIFECYCLE ===================== */
 
     function startMarketWatcher(marketAlertEl, marketStatusEl) {
+        // Stop the previous timers without clearing the restart marker. The old
+        // order wrote the marker first and then deleted it inside stopMarketWatcher,
+        // so a watcher started manually was not restored after a refresh.
+        stopMarketWatcher(false);
         sessionStorage.setItem('wm_watcher_active', '1');
-        stopMarketWatcher();
         marketWatcherActive = true;
         lastMarketHits.clear();
         activeHitsMap.clear();
@@ -8010,6 +8100,19 @@ function sendToDiscord(text, color = 5814783, category = 'general') {
                             style="padding:3px 8px;border-radius:4px;border:1px solid rgba(255,255,255,0.1);background:#0f0f13;color:#888;font-size:11px;cursor:pointer;">✕</button>
                     </div>
                     <div style="display:flex;align-items:center;gap:6px;margin-bottom:8px;">
+                        <span class="wm-lbl" style="margin:0;white-space:nowrap;">Rareté</span>
+                        <select id="wm-market-rarity-filter" title="Rareté recherchée"
+                            style="flex:1;padding:3px 6px;border-radius:4px;border:1px solid rgba(255,255,255,0.1);background:#0f0f13;color:#fff;font-size:11px;outline:none;cursor:pointer;">
+                            <option value="">⭐ Toutes les raretés</option>
+                            <option value="L">L — Légendaire</option>
+                            <option value="UR">UR — Ultra rare</option>
+                            <option value="SR">SR — Super rare</option>
+                            <option value="R">R — Rare</option>
+                            <option value="PC">PC — Peu commune</option>
+                            <option value="C">C — Commune</option>
+                        </select>
+                    </div>
+                    <div style="display:flex;align-items:center;gap:6px;margin-bottom:8px;">
                         <span class="wm-lbl" style="margin:0;white-space:nowrap;">Tri</span>
                         <select id="wm-sort-select" style="flex:1;padding:3px 6px;border-radius:4px;border:1px solid rgba(255,255,255,0.1);background:#0f0f13;color:#fff;font-size:11px;outline:none;cursor:pointer;">
                             <option value="time_asc">⏱ Fin proche</option>
@@ -8562,6 +8665,19 @@ function sendToDiscord(text, color = 5814783, category = 'general') {
             hideOwnedChk.onchange = () => {
                 marketHideOwned = hideOwnedChk.checked;
                 try { localStorage.setItem(MARKET_HIDE_OWNED_KEY, marketHideOwned ? '1' : '0'); } catch(e) {}
+                if (lastHitsCache.length > 0) renderMarketHits(marketAlertEl, lastHitsCache, []);
+            };
+        }
+
+        // Filtre de rareté du Market Watcher (persisté).
+        const marketRaritySelect = document.getElementById('wm-market-rarity-filter');
+        if (marketRaritySelect) {
+            marketRaritySelect.value = marketRarityFilter;
+            marketRaritySelect.onchange = () => {
+                const value = marketRaritySelect.value.toUpperCase();
+                if (value && !Object.prototype.hasOwnProperty.call(RARITY, value)) return;
+                marketRarityFilter = value;
+                try { localStorage.setItem(MARKET_RARITY_KEY, marketRarityFilter); } catch(e) {}
                 if (lastHitsCache.length > 0) renderMarketHits(marketAlertEl, lastHitsCache, []);
             };
         }

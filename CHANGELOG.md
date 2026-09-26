@@ -8,6 +8,24 @@ Légende : 🆕 nouveauté · ✨ amélioration · 🛠️ correction
 
 ---
 
+## 2026-09-26 — v1.4.1
+
+### 🛠️ Correction
+
+- Le Market Watcher pouvait afficher des enchères déjà terminées lorsque l'API les
+  retournait encore dans son cache. Les enchères dont la date de fin est dépassée ou dont
+  le statut est terminal sont maintenant exclues avant tout filtrage et retirées du cache UI.
+- Le scan du Market Watcher passe de 10 à 5 secondes. Un filtre de rareté persistant permet
+  de choisir L, UR, SR, R, PC ou C ; « Toutes les raretés » reste le réglage par défaut.
+- Le mode Fourbe arme désormais une enchère dès sa détection dans la fenêtre des 5 dernières
+  minutes ; la mise reste déclenchée uniquement à la seconde configurée de fin.
+- Le marqueur de reprise du Market Watcher n'était plus conservé au démarrage : le
+  nettoyage de l'ancien watcher supprimait immédiatement le marqueur qui venait d'être écrit.
+- Les requêtes avec timeout respectent maintenant aussi le signal d'annulation fourni par
+  leur appelant, afin qu'un module arrêté ne reste pas bloqué jusqu'au timeout réseau.
+- La détection anticipée accepte maintenant les dates de fin au format Unix secondes,
+  Unix millisecondes ou ISO.
+
 ## 2026-08-20 — v1.4.x (suite 2)
 
 ### 🛠️ Correction
