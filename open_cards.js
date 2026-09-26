@@ -1,7 +1,7 @@
 (function () {
 
     /* Numéro de version du bot — affiché en bas du panneau Paramètres. */
-    const WM_VERSION = '1.4.2-prod';
+    const WM_VERSION = '1.4.3-prod';
 
     console.log('[WikiMasters] script loaded v' + WM_VERSION + ' - building UI...');
 
@@ -19,7 +19,7 @@
     const KEYWORDS_FOURBE_KEY = 'wm_keywords_fourbe';
     const KEYWORDS_EXCLUDE_KEY = 'wm_keywords_exclude';
     const KEYWORDS_HUNTER_KEY = 'wm_keywords_hunter';
-    const MARKET_REFRESH_MS = 5000;
+    const MARKET_REFRESH_MS = 10000;
     const MARKET_API_BASE = "https://www.wiki-masters.com/api/marketplace";
     const MARKET_PAGE_LIMIT = 50;
     const MARKET_PAGE_CONCURRENCY = 5; // pages chargées en parallèle par lot
@@ -632,15 +632,19 @@
 
     // Filtre de recherche live du Market Watcher (transitoire, non persisté)
     let marketSearchQuery = '';
-    // Filtre de rareté du Market Watcher : vide = toutes les raretés.
+    // Filtre de rareté du Market Watcher : Set vide = toutes les raretés.
     const MARKET_RARITY_KEY = 'wm_market_rarity_filter';
-    let marketRarityFilter = '';
+    let marketRarityFilter = new Set();
     try {
-        const savedRarity = (localStorage.getItem(MARKET_RARITY_KEY) || '').toUpperCase();
-        if (!savedRarity || Object.prototype.hasOwnProperty.call(RARITY, savedRarity)) {
-            marketRarityFilter = savedRarity;
-        }
+        const saved = localStorage.getItem(MARKET_RARITY_KEY) || '';
+        const values = saved.trim().startsWith('[') ? JSON.parse(saved) : [saved];
+        marketRarityFilter = new Set(values.map(v => String(v || '').toUpperCase())
+            .filter(v => Object.prototype.hasOwnProperty.call(RARITY, v)));
     } catch(e) {}
+    function marketRarityMatches(auction) {
+        return marketRarityFilter.size === 0
+            || marketRarityFilter.has((auction?.card?.rarity || '').toUpperCase());
+    }
     // Masquer les enchères dont je possède déjà la carte (persisté)
     const MARKET_HIDE_OWNED_KEY = 'wm_market_hide_owned';
     let marketHideOwned = false;
@@ -3425,7 +3429,7 @@ function sendToDiscord(text, color = 5814783, category = 'general') {
                 const cls = classifyAuctionKeywords(a.card);
                 kwClassCache.set(a.id, cls);
                 if (myBidsSet.has(a.id)) return true;
-                if (marketRarityFilter && (a.card?.rarity || '').toUpperCase() !== marketRarityFilter) return false;
+                if (!marketRarityMatches(a)) return false;
                 if (cls.excluded) return false;
                 return cls.keywordMatch;
             });
@@ -3814,20 +3818,19 @@ function sendToDiscord(text, color = 5814783, category = 'general') {
 
         // Le filtre de rareté s'applique aussi au rendu immédiat et aux données
         // restaurées après actualisation. Les enchères déjà suivies restent visibles.
-        if (marketRarityFilter) {
-            hits = hits.filter(a => myBidsSet.has(a.id)
-                || (a.card?.rarity || '').toUpperCase() === marketRarityFilter);
+        if (marketRarityFilter.size > 0) {
+            hits = hits.filter(a => myBidsSet.has(a.id) || marketRarityMatches(a));
         }
 
         // Filtres d'affichage : recherche live (titre/catégorie/mot-clé, sans accents)
         // + masquage des cartes déjà possédées.
         const totalBeforeFilter = hits.length;
         const sq = marketSearchNorm(marketSearchQuery.trim());
-        const filterActive = sq || marketHideOwned || marketRarityFilter;
+        const filterActive = sq || marketHideOwned || marketRarityFilter.size > 0;
         if (filterActive) {
             hits = hits.filter(a => {
-                if (marketRarityFilter && !myBidsSet.has(a.id)
-                    && (a.card?.rarity || '').toUpperCase() !== marketRarityFilter) return false;
+                if (marketRarityFilter.size > 0 && !myBidsSet.has(a.id)
+                    && !marketRarityMatches(a)) return false;
                 // Masque les cartes déjà possédées DANS LA MÊME RARETÉ. Une carte possédée en
                 // SR mais listée en UR (revalorisée par le site) n'est PAS un doublon → visible.
                 if (marketHideOwned && isOwnedDuplicate(a.card?.id ?? a.card_id, a.card?.rarity)) return false;
@@ -8139,7 +8142,7 @@ function sendToDiscord(text, color = 5814783, category = 'general') {
                     </div>
                     <div style="display:flex;align-items:center;gap:6px;margin-bottom:8px;">
                         <span class="wm-lbl" style="margin:0;white-space:nowrap;">Rareté</span>
-                        <select id="wm-market-rarity-filter" title="Rareté recherchée"
+                        <select id="wm-market-rarity-filter" title="Raretés recherchées — Ctrl/Cmd + clic pour en sélectionner plusieurs" multiple size="7"
                             style="flex:1;padding:3px 6px;border-radius:4px;border:1px solid rgba(255,255,255,0.1);background:#0f0f13;color:#fff;font-size:11px;outline:none;cursor:pointer;">
                             <option value="">⭐ Toutes les raretés</option>
                             <option value="L">L — Légendaire</option>
@@ -8710,12 +8713,20 @@ function sendToDiscord(text, color = 5814783, category = 'general') {
         // Filtre de rareté du Market Watcher (persisté).
         const marketRaritySelect = document.getElementById('wm-market-rarity-filter');
         if (marketRaritySelect) {
-            marketRaritySelect.value = marketRarityFilter;
+            for (const option of marketRaritySelect.options) {
+                option.selected = option.value === ''
+                    ? marketRarityFilter.size === 0
+                    : marketRarityFilter.has(option.value);
+            }
             marketRaritySelect.onchange = () => {
-                const value = marketRaritySelect.value.toUpperCase();
-                if (value && !Object.prototype.hasOwnProperty.call(RARITY, value)) return;
-                marketRarityFilter = value;
-                try { localStorage.setItem(MARKET_RARITY_KEY, marketRarityFilter); } catch(e) {}
+                const values = [...marketRaritySelect.selectedOptions]
+                    .map(option => option.value.toUpperCase())
+                    .filter(value => Object.prototype.hasOwnProperty.call(RARITY, value));
+                marketRarityFilter = new Set(values);
+                for (const option of marketRaritySelect.options) {
+                    if (option.value === '') option.selected = values.length === 0;
+                }
+                try { localStorage.setItem(MARKET_RARITY_KEY, JSON.stringify(values)); } catch(e) {}
                 if (lastHitsCache.length > 0) renderMarketHits(marketAlertEl, lastHitsCache, []);
             };
         }

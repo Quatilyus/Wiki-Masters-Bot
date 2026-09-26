@@ -8,6 +8,14 @@ Légende : 🆕 nouveauté · ✨ amélioration · 🛠️ correction
 
 ---
 
+## 2026-09-26 — v1.4.3
+
+### 🛠️ Correction
+
+- Retour du contrôle du Market Watcher à 10 secondes.
+- Le filtre de rareté accepte maintenant plusieurs raretés simultanément et migre l'ancien réglage simple.
+- Les enchères terminées restent exclues du scan et de l'affichage.
+
 ## 2026-09-26 — v1.4.2
 
 ### 🛠️ Correction

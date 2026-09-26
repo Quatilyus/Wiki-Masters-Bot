@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         WikiMasters Bot
 // @namespace    wiki-masters-bot
-// @version      1.4.2
+// @version      1.4.3
 // @description  Pack Opener + stats, Market Watcher (auto-bid / snipe / wishlist), Trash Seller — pour wiki-masters.com
 // @author       Sephiroth-ctrl
 // @match        https://www.wiki-masters.com/*
