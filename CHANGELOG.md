@@ -8,6 +8,13 @@ Légende : 🆕 nouveauté · ✨ amélioration · 🛠️ correction
 
 ---
 
+## 2026-09-26 — v1.4.2
+
+### 🛠️ Correction
+
+- L'historique des ventes est maintenant mis en pause après un `401/403/404` afin d'éviter les centaines de requêtes refusées.
+- Le Market Watcher continue de scanner le marché même lorsque cet historique est indisponible.
+
 ## 2026-09-26 — v1.4.1
 
 ### 🛠️ Correction

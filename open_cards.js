@@ -1,7 +1,7 @@
 (function () {
 
     /* Numéro de version du bot — affiché en bas du panneau Paramètres. */
-    const WM_VERSION = '1.4.1-prod';
+    const WM_VERSION = '1.4.2-prod';
 
     console.log('[WikiMasters] script loaded v' + WM_VERSION + ' - building UI...');
 
@@ -732,6 +732,11 @@
     const salesFetchQueue = [];
     const salesFetchQueued = new Set(); // évite les doublons dans la file
     let salesFetchRunning = false;
+    // L'historique des ventes peut être interdit alors que le marché reste accessible.
+    // Coupe les retries en cascade pour laisser le Market Watcher respirer.
+    let salesEndpointBlockedUntil = 0;
+    let salesEndpointBlockedLogged = false;
+    const SALES_ENDPOINT_BLOCK_COOLDOWN_MS = 30 * 60 * 1000;
 
     function median(nums) {
         if (!nums.length) return 0;
@@ -744,12 +749,22 @@
 
     // Récupère et met en cache l'historique d'une carte (une requête)
     async function fetchCardSales(cardId) {
+        if (Date.now() < salesEndpointBlockedUntil) return null;
         try {
             const res = await fetch(
                 `https://www.wiki-masters.com/api/marketplace/cards/${cardId}/sales`,
                 { credentials: "include" }
             );
-            if (!res.ok) return null;
+            if (!res.ok) {
+                if (res.status === 401 || res.status === 403 || res.status === 404) {
+                    salesEndpointBlockedUntil = Date.now() + SALES_ENDPOINT_BLOCK_COOLDOWN_MS;
+                    if (!salesEndpointBlockedLogged) {
+                        salesEndpointBlockedLogged = true;
+                        wmLog(`ℹ️ Historique des ventes indisponible (${res.status}) — valorisation désactivée temporairement, Market Watcher maintenu.`);
+                    }
+                }
+                return null;
+            }
             const data = await res.json();
             const sales = (data.sales || []).filter(s => Number.isFinite(s.final_price));
             const prices = sales.map(s => s.final_price);
@@ -778,6 +793,11 @@
         if (salesFetchRunning) return;
         salesFetchRunning = true;
         while (salesFetchQueue.length > 0) {
+            if (Date.now() < salesEndpointBlockedUntil) {
+                salesFetchQueue.length = 0;
+                salesFetchQueued.clear();
+                break;
+            }
             const cardId = salesFetchQueue.shift();
             salesFetchQueued.delete(cardId);
             if (getCachedSales(cardId)) continue; // déjà en cache valide entre-temps
